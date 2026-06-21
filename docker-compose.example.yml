@@ -1,0 +1,609 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# HSMetric Stack - Plataforma de Automação e Análise de Dados
+# ══════════════════════════════════════════════════════════════════════════════
+# Stack completo com:
+#   - Proxy reverso (Traefik) com SSL automático
+#   - Automação de workflows (n8n)
+#   - Banco de dados (PostgreSQL + Redis)
+#   - BI e Analytics (Metabase)
+#   - Armazenamento de objetos (MinIO)
+#   - Processamento distribuído (Apache Spark)
+#   - Ambiente de desenvolvimento (Jupyter, Code Server)
+#   - Administração (pgAdmin, Portainer)
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: hsmetric
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SERVIÇOS PRINCIPAIS
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # TRAEFIK - Proxy Reverso e Gateway SSL
+  # ════════════════════════════════════════════════════════════════════════════
+  # Gerencia todo o tráfego HTTPS com certificados Let's Encrypt automáticos
+  # Dashboard disponível em: https://traefik.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  traefik:
+    image: traefik:v3.6.10
+    container_name: traefik
+    restart: unless-stopped
+    
+    # Configuração do Traefik
+    command:
+      # Dashboard e API
+      - --api.dashboard=true
+      - --api.insecure=false
+      
+      # Provider Docker - descobre serviços automaticamente
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      
+      # Entrypoints - portas de entrada
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      
+      # Let's Encrypt - SSL automático
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      
+      # Logs
+      - --accesslog=true
+      - --log.level=INFO
+    
+    ports:
+      - "80:80"      # HTTP (redireciona para HTTPS)
+      - "443:443"    # HTTPS
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # Acesso ao Docker
+      - ./volumes/traefik:/letsencrypt                 # Certificados SSL
+    
+    networks:
+      - proxy
+    
+    labels:
+      - traefik.enable=true
+      
+      # Roteamento do dashboard
+      - traefik.http.routers.traefik.rule=Host(`${TRAEFIK_HOST}`)
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.tls.certresolver=le
+      - traefik.http.routers.traefik.service=api@internal
+      
+      # Middleware de segurança
+      - traefik.http.middlewares.secure-headers.headers.sslredirect=true
+      - traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.secure-headers.headers.browserXssFilter=true
+      - traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.secure-headers.headers.forceSTSHeader=true
+      - traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.secure-headers.headers.stsPreload=true
+      
+      # Autenticação básica no dashboard
+      - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_BASIC_AUTH}
+      - traefik.http.routers.traefik.middlewares=traefik-auth,secure-headers
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # POSTGRESQL - Banco de Dados Principal
+  # ════════════════════════════════════════════════════════════════════════════
+  # Armazena dados de: n8n, Metabase
+  # Imagem Alpine otimizada para menor consumo de recursos
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    
+    environment:
+      # Superusuário PostgreSQL
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERPASSWORD}
+      
+      # Banco principal (n8n)
+      POSTGRES_DB: ${N8N_DB_NAME}
+      N8N_DB_NAME: ${N8N_DB_NAME}
+      N8N_DB_USER: ${N8N_DB_USER}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+      
+      # Banco Metabase
+      METABASE_DB_NAME: ${METABASE_DB_NAME}
+      METABASE_DB_USER: ${METABASE_DB_USER}
+      METABASE_DB_PASSWORD: ${METABASE_DB_PASSWORD}
+    
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data  # Dados persistentes
+      - ./initdb:/docker-entrypoint-initdb.d         # Scripts de inicialização
+    
+    networks:
+      - internal
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # REDIS - Cache e Fila de Mensagens
+  # ════════════════════════════════════════════════════════════════════════════
+  # Usado pelo n8n para:
+  #   - Gerenciamento de filas (Bull)
+  #   - Comunicação entre workers
+  #   - Cache de execuções
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD}
+    
+    volumes:
+      - ./volumes/redis:/data  # Persistência AOF
+    
+    networks:
+      - internal
+    
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # N8N - Automação de Workflows (Main)
+  # ════════════════════════════════════════════════════════════════════════════
+  # Editor principal onde você cria e gerencia workflows
+  # Acesso: https://n8n.<seu-dominio>
+  # Modo: Queue (execuções distribuídas via Redis + Workers)
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    container_name: n8n
+    restart: unless-stopped
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    environment:
+      # Timezone
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      
+      # Configuração de URL e protocolo
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}
+      WEBHOOK_URL: https://${N8N_HOST}
+      N8N_PROXY_HOPS: 1  # Traefik à frente
+      
+      # Modo de execução distribuído
+      EXECUTIONS_MODE: queue
+      N8N_RUNNERS_ENABLED: true
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
+      
+      # Banco de dados PostgreSQL
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      
+      # Fila Redis
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      
+      # Segurança
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_SECURE_COOKIE: true
+      N8N_DIAGNOSTICS_ENABLED: false
+      N8N_PERSONALIZATION_ENABLED: false
+      
+      # Autenticação básica
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      
+      # Outras configurações
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RELEASE_DATE: "2025-03-07T00:00:00Z"
+    
+    volumes:
+      - ./volumes/n8n:/home/node/.n8n  # Workflows e dados
+      - ./workspace:/files              # Arquivos compartilhados
+    
+    networks:
+      - proxy     # Para Traefik
+      - internal  # Para Postgres e Redis
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)
+      - traefik.http.routers.n8n.entrypoints=websecure
+      - traefik.http.routers.n8n.tls.certresolver=le
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
+      - traefik.http.routers.n8n.middlewares=secure-headers
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # N8N WORKER - Executor de Workflows
+  # ════════════════════════════════════════════════════════════════════════════
+  # Processa workflows em background (sem interface)
+  # Consome tarefas da fila Redis
+  # Pode ser escalado horizontalmente (múltiplos workers)
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    container_name: n8n-worker
+    restart: unless-stopped
+    command: worker  # Modo worker (sem UI)
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    environment:
+      # Timezone
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      
+      # Modo de execução
+      EXECUTIONS_MODE: queue
+      
+      # Banco de dados PostgreSQL
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      
+      # Fila Redis
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      
+      # Segurança
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RELEASE_DATE: "2025-03-07T00:00:00Z"
+    
+    volumes:
+      - ./volumes/n8n:/home/node/.n8n  # Workflows compartilhados
+      - ./workspace:/files              # Arquivos compartilhados
+    
+    networks:
+      - internal  # Apenas rede interna (sem acesso externo)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROFILE: apps - Ferramentas de Administração
+# ──────────────────────────────────────────────────────────────────────────────
+# Ativar com: docker compose --profile apps up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # PGADMIN - Interface Web para PostgreSQL
+  # ════════════════════════════════════════════════════════════════════════════
+  # Gerenciamento visual do banco de dados
+  # Acesso: https://pgadmin.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: pgadmin
+    restart: unless-stopped
+    profiles: ["apps"]
+    
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+    
+    volumes:
+      - ./volumes/pgadmin:/var/lib/pgadmin
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.pgadmin.rule=Host(`${PGADMIN_HOST}`)
+      - traefik.http.routers.pgadmin.entrypoints=websecure
+      - traefik.http.routers.pgadmin.tls.certresolver=le
+      - traefik.http.services.pgadmin.loadbalancer.server.port=80
+      - traefik.http.routers.pgadmin.middlewares=secure-headers
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROFILE: ops - Ferramentas de Operação
+# ──────────────────────────────────────────────────────────────────────────────
+# Ativar com: docker compose --profile ops up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # PORTAINER - Gerenciamento Docker via Web
+  # ════════════════════════════════════════════════════════════════════════════
+  # Interface visual para gerenciar containers, volumes, redes, etc.
+  # Acesso: https://portainer.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  portainer:
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    profiles: ["ops"]
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # Acesso ao Docker
+      - ./volumes/portainer:/data                   # Configurações
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.portainer.rule=Host(`${PORTAINER_HOST}`)
+      - traefik.http.routers.portainer.entrypoints=websecure
+      - traefik.http.routers.portainer.tls.certresolver=le
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+      - traefik.http.routers.portainer.middlewares=secure-headers
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROFILE: data - Armazenamento e Processamento de Dados
+# ──────────────────────────────────────────────────────────────────────────────
+# Ativar com: docker compose --profile data up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # MINIO - Armazenamento de Objetos (S3-compatible)
+  # ════════════════════════════════════════════════════════════════════════════
+  # API S3: https://s3.<seu-dominio>
+  # Console: https://minio.<seu-dominio>
+  # Ideal para: backups, arquivos grandes, data lakes
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    profiles: ["data"]
+    command: server /data --console-address ":9001"
+    
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL}
+    
+    volumes:
+      - ./volumes/minio:/data
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      
+      # API S3 (porta 9000)
+      - traefik.http.routers.minio-api.rule=Host(`${MINIO_HOST}`)
+      - traefik.http.routers.minio-api.entrypoints=websecure
+      - traefik.http.routers.minio-api.tls.certresolver=le
+      - traefik.http.routers.minio-api.service=minio-api
+      - traefik.http.services.minio-api.loadbalancer.server.port=9000
+      
+      # Console Web (porta 9001)
+      - traefik.http.routers.minio-console.rule=Host(`${MINIO_CONSOLE_HOST}`)
+      - traefik.http.routers.minio-console.entrypoints=websecure
+      - traefik.http.routers.minio-console.tls.certresolver=le
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.services.minio-console.loadbalancer.server.port=9001
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JUPYTER - Notebooks Python para Análise de Dados
+  # ════════════════════════════════════════════════════════════════════════════
+  # JupyterLab com bibliotecas científicas (NumPy, Pandas, SciPy, etc.)
+  # Acesso: https://jupyter.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: jupyter
+    restart: unless-stopped
+    profiles: ["data"]
+    
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
+    
+    volumes:
+      - ./volumes/jupyter:/home/jovyan/work  # Notebooks
+      - ./workspace:/workspace               # Arquivos compartilhados
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.jupyter.rule=Host(`${JUPYTER_HOST}`)
+      - traefik.http.routers.jupyter.entrypoints=websecure
+      - traefik.http.routers.jupyter.tls.certresolver=le
+      - traefik.http.services.jupyter.loadbalancer.server.port=8888
+      - traefik.http.routers.jupyter.middlewares=secure-headers
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # APACHE SPARK - Processamento Distribuído de Big Data
+  # ════════════════════════════════════════════════════════════════════════════
+  # Master: coordena jobs e recursos
+  # Worker: executa tarefas de processamento
+  # Web UI: https://spark.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  spark-master:
+    image: apache/spark:3.5.1-python3
+    container_name: spark-master
+    restart: unless-stopped
+    profiles: ["data"]
+    hostname: spark-master
+    
+    command: >
+      /bin/bash -c "/opt/spark/sbin/start-master.sh --host spark-master --port 7077 --webui-port 8080 && tail -f /opt/spark/logs/*"
+    
+    volumes:
+      - ./volumes/spark:/opt/spark/work-dir
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.spark.rule=Host(`${SPARK_HOST}`)
+      - traefik.http.routers.spark.entrypoints=websecure
+      - traefik.http.routers.spark.tls.certresolver=le
+      - traefik.http.services.spark.loadbalancer.server.port=8080
+
+  spark-worker:
+    image: apache/spark:3.5.1-python3
+    container_name: spark-worker
+    restart: unless-stopped
+    profiles: ["data"]
+    depends_on:
+      - spark-master
+    hostname: spark-worker
+    
+    command: >
+      /bin/bash -c "sleep 15; /opt/spark/sbin/start-worker.sh --webui-port 8081 spark://spark-master:7077 && tail -f /opt/spark/logs/*"
+    
+    volumes:
+      - ./volumes/spark:/opt/spark/work-dir
+    
+    networks:
+      - internal  # Apenas comunicação interna
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROFILE: bi - Business Intelligence
+# ──────────────────────────────────────────────────────────────────────────────
+# Ativar com: docker compose --profile bi up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # METABASE - Plataforma de BI e Visualização de Dados
+  # ════════════════════════════════════════════════════════════════════════════
+  # Dashboards, relatórios e análises visuais
+  # Acesso: https://bi.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    restart: unless-stopped
+    profiles: ["bi"]
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    environment:
+      # Banco de dados do Metabase (metadados)
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: ${METABASE_DB_NAME}
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${METABASE_DB_USER}
+      MB_DB_PASS: ${METABASE_DB_PASSWORD}
+      MB_DB_HOST: postgres
+      JAVA_TIMEZONE: ${TZ}
+    
+    volumes:
+      - ./volumes/metabase:/metabase-data
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.metabase.rule=Host(`${METABASE_HOST}`)
+      - traefik.http.routers.metabase.entrypoints=websecure
+      - traefik.http.routers.metabase.tls.certresolver=le
+      - traefik.http.services.metabase.loadbalancer.server.port=3000
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PROFILE: lab - Ambiente de Desenvolvimento
+# ──────────────────────────────────────────────────────────────────────────────
+# Ativar com: docker compose --profile lab up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # CODE-SERVER - VS Code no Navegador
+  # ════════════════════════════════════════════════════════════════════════════
+  # IDE completo acessível via browser
+  # Acesso: https://code.<seu-dominio>
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  code-server:
+    image: codercom/code-server:latest
+    container_name: code-server
+    restart: unless-stopped
+    profiles: ["lab"]
+    
+    environment:
+      TZ: ${TZ}
+      PASSWORD: ${CODE_SERVER_PASSWORD}
+    
+    volumes:
+      - ./volumes/code-server:/home/coder/.local/share/code-server  # Configurações
+      - ./workspace:/home/coder/project                              # Projetos
+    
+    networks:
+      - proxy
+      - internal
+    
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.code.rule=Host(`${CODE_HOST}`)
+      - traefik.http.routers.code.entrypoints=websecure
+      - traefik.http.routers.code.tls.certresolver=le
+      - traefik.http.services.code.loadbalancer.server.port=8080
+      - traefik.http.routers.code.middlewares=secure-headers
+
+# ──────────────────────────────────────────────────────────────────────────────
+# REDES
+# ──────────────────────────────────────────────────────────────────────────────
+
+networks:
+  # Rede externa - serviços acessíveis via Traefik
+  proxy:
+    name: proxy
+  
+  # Rede interna - comunicação entre serviços
+  internal:
+    name: internal
