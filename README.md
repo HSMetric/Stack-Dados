@@ -66,7 +66,7 @@ A HSMetric Stack é uma plataforma modular, multi-serviço e orientada a perfis,
 │  CAMADA DE ENTRADA (Rede: proxy)                            │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  Traefik (80/443)                                   │    │
-│  │  • Reverse Proxy                                     │    │
+│  │  • Reverse Proxy                                    │    │
 │  │  • SSL Automático (Let's Encrypt)                   │    │
 │  │  • Roteamento por Subdomínio                        │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -74,18 +74,18 @@ A HSMetric Stack é uma plataforma modular, multi-serviço e orientada a perfis,
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  CAMADA CORE (Redes: proxy + internal)                      │
-│  ┌──────────────┐  ┌──────────┐  ┌─────────────────────┐   │
-│  │ PostgreSQL   │  │  Redis   │  │  n8n + n8n-worker   │   │
-│  │ (multi-db)   │  │ (queue)  │  │  (queue mode)       │   │
-│  └──────────────┘  └──────────┘  └─────────────────────┘   │
+│  ┌──────────────┐  ┌──────────┐  ┌─────────────────────┐    │
+│  │ PostgreSQL   │  │  Redis   │  │  n8n + n8n-worker   │    │
+│  │ (multi-db)   │  │ (queue)  │  │  (queue mode)       │    │
+│  └──────────────┘  └──────────┘  └─────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  CAMADAS OPCIONAIS (Profiles)                               │
-│                                                              │
+│                                                             │
 │  [apps]  pgAdmin                                            │
 │  [ops]   Portainer                                          │
-│  [data]  MinIO + Jupyter + Spark (master/worker)           │
+│  [data]  MinIO + Jupyter + Spark (master/worker)            │
 │  [bi]    Metabase                                           │
 │  [lab]   Code Server                                        │
 └─────────────────────────────────────────────────────────────┘
